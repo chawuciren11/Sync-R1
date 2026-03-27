@@ -24,13 +24,14 @@
    - Understanding tasks: save text predictions and `manifest.json`
 2. `--mode score`
    - Read manifests
-   - Compute CLIP / GPT / BLEU / accuracy style metrics
+   - Compute CLIP / GPT / BLEU / weighted recall style metrics
    - Write per-concept and per-epoch summaries
 
 ## Task names
 
 - Generation: `pure_gen`, `dense_gen`, `rea_gen`, `dense_rea_gen`
-- Understanding: `rec`, `vqa`, `text_only`, `rea`, `dense_rea`
+- Understanding: `rec`, `vqa`, `qa`, `rea`, `dense_rea`
+- Legacy alias: `text_only` is still accepted and maps to `qa`
 
 ## Reproducibility defaults
 

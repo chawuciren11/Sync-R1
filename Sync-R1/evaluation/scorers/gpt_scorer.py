@@ -21,6 +21,10 @@ def _split_prompt(prompt: str) -> list[str]:
     return [clause.strip() for clause in clauses if clause.strip()]
 
 
+def _split_prompt_by_comma(prompt: str) -> list[str]:
+    return [clause.strip() for clause in prompt.split(",") if clause.strip()]
+
+
 class GPTScorer:
     """OpenAI-compatible multimodal/text judge used by both evaluation families."""
 
@@ -52,6 +56,14 @@ class GPTScorer:
         scores = [self._score_single_image_clause(image_path, clause) for clause in clauses]
         return float(sum(scores) / len(scores))
 
+    def score_dense_prompt_clause_coverage(self, image_path: str | Path, prompt: str) -> float:
+        clauses = _split_prompt_by_comma(prompt)
+        if not clauses:
+            return 0.0
+
+        clause_hits = [self._score_single_image_clause_binary(image_path, clause) for clause in clauses]
+        return float(sum(clause_hits) / len(clause_hits))
+
     def score_text_answer(self, query: str, reference: str, prediction: str) -> float:
         system_prompt = (
             "You are a score evaluator. Given a question, a reference answer, and a predicted answer, "
@@ -64,6 +76,39 @@ class GPTScorer:
             f"Question: {query}\n"
             f"Reference answer: {reference}\n"
             f"Predicted answer: {prediction}"
+        )
+        response = self.client.chat.completions.create(
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        content = response.choices[0].message.content or ""
+        return _extract_score(content)
+
+    def score_prompt_similarity(
+        self,
+        source_prompt: str,
+        reference_prompt: str,
+        prediction: str,
+    ) -> float:
+        system_prompt = (
+            "You are evaluating a rewritten image-generation prompt. "
+            "Compare the predicted prompt against the reference rewritten prompt and score it with one of "
+            "{0, 0.5, 1}. "
+            "1 means the predicted prompt preserves the original intent and captures the key personalized "
+            "details in the reference prompt. "
+            "0.5 means it is partially correct but misses or weakens some important personalized details. "
+            "0 means it fails to capture the required personalized details or changes the intended meaning. "
+            "Ignore grammar and small wording differences. Return only the numeric score."
+        )
+        user_prompt = (
+            f"Original prompt: {source_prompt}\n"
+            f"Reference rewritten prompt: {reference_prompt}\n"
+            f"Predicted rewritten prompt: {prediction}"
         )
         response = self.client.chat.completions.create(
             model=self.model,
@@ -108,3 +153,35 @@ class GPTScorer:
         )
         content = response.choices[0].message.content or ""
         return _extract_score(content)
+
+    def _score_single_image_clause_binary(self, image_path: str | Path, clause: str) -> float:
+        image_path = Path(image_path)
+        mime_type = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
+        encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+        image_url = f"data:{mime_type};base64,{encoded}"
+
+        system_prompt = (
+            "You are a professional image evaluator. "
+            "Determine whether the image clearly presents the described text clause. "
+            "Return only one score from {0, 1}. "
+            "1 means the clause is clearly present in the image, and 0 means it is not present or too uncertain."
+        )
+        user_prompt = f"Text clause: {clause}"
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_prompt},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                },
+            ],
+        )
+        content = response.choices[0].message.content or ""
+        return 1.0 if _extract_score(content) >= 0.5 else 0.0

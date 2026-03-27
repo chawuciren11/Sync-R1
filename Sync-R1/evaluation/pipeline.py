@@ -67,9 +67,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default=PIPELINE_DEFAULTS["device"])
     parser.add_argument("--inverse-prompt", dest="inverse_prompt", action="store_true", default=PIPELINE_DEFAULTS["inverse_prompt"])
     parser.add_argument("--no-inverse-prompt", dest="inverse_prompt", action="store_false")
-    parser.add_argument("--num-images", type=int, default=PIPELINE_DEFAULTS["num_images"], help="Override generation task image count.")
+    parser.add_argument(
+        "--num-images",
+        type=int,
+        default=PIPELINE_DEFAULTS["num_images"],
+        help="Number of images to generate per prompt for all generation tasks.",
+    )
     parser.add_argument("--batch-size", type=int, default=PIPELINE_DEFAULTS["batch_size"], help="Override generation task batch size.")
     parser.add_argument("--reference-image-count", type=int, default=PIPELINE_DEFAULTS["reference_image_count"])
+    parser.add_argument("--clip-i-reference-image-count", type=int, default=PIPELINE_DEFAULTS["clip_i_reference_image_count"])
     parser.add_argument("--mmu-top-k", type=int, default=PIPELINE_DEFAULTS["mmu_top_k"])
     parser.add_argument("--mmu-max-new-tokens", type=int, default=PIPELINE_DEFAULTS["mmu_max_new_tokens"])
     parser.add_argument("--allow-remote-models", action="store_true", default=PIPELINE_DEFAULTS["allow_remote_models"], help="Disable local_files_only for model loading.")
@@ -190,12 +196,29 @@ def _build_adapter(args: argparse.Namespace) -> "BaseEvalAdapter":
     )
 
 
+def _generation_stage_task_order(task_names: list[str]) -> list[str]:
+    original_order = {task_name: idx for idx, task_name in enumerate(task_names)}
+    priority = {
+        "rec": 10,
+        "vqa": 10,
+        "qa": 10,
+        "rea": 10,
+        "dense_rea": 10,
+        "pure_gen": 20,
+        "dense_gen": 20,
+        "rea_gen": 30,
+        "dense_rea_gen": 30,
+    }
+    return sorted(task_names, key=lambda name: (priority.get(name, 20), original_order[name]))
+
+
 def run_generation_stage(args: argparse.Namespace, task_names: list[str], concepts: list[str]) -> list[Path]:
     adapter = _build_adapter(args)
     output_root = Path(args.output_root)
     generated_manifests: list[Path] = []
+    ordered_task_names = _generation_stage_task_order(task_names)
 
-    for task_name in task_names:
+    for task_name in ordered_task_names:
         task_definition = TASKS[task_name]
         for concept in concepts:
             for model_epoch in args.model_epochs:
@@ -222,8 +245,12 @@ def run_generation_stage(args: argparse.Namespace, task_names: list[str], concep
                         nums_new_token_i_stage_1=args.nums_new_token_i_stage_1,
                         nums_new_token_i_stage_2=args.nums_new_token_i_stage_2,
                         reference_image_count=args.reference_image_count,
+                        clip_i_reference_image_count=args.clip_i_reference_image_count,
+                        output_root=args.output_root,
+                        token_epoch=args.epoch_to_load,
+                        model_epoch=model_epoch,
                     )
-                    num_outputs = args.num_images or task_definition.default_num_outputs
+                    num_outputs = args.num_images
                     batch_size = args.batch_size or task_definition.default_batch_size
                     adapter.generate_images(
                         task_name=task_name,
@@ -284,23 +311,111 @@ def _build_gpt_scorer_if_needed(args: argparse.Namespace, task_names: list[str])
     )
 
 
+def _build_generation_score_payload(
+    manifest: RunManifest,
+    prompt_results: list[dict[str, Any]],
+    *,
+    complete: bool,
+) -> dict[str, Any]:
+    summary = mean_metric_dict([item["metrics"] for item in prompt_results])
+    summary = _attach_legacy_metric_aliases(summary)
+    return {
+        "task": manifest.task,
+        "family": manifest.family,
+        "concept": manifest.concept,
+        "token_epoch": manifest.token_epoch,
+        "model_epoch": manifest.model_epoch,
+        "adapter": manifest.adapter,
+        "complete": complete,
+        "progress": {
+            "completed": len(prompt_results),
+            "total": len(manifest.prompt_artifacts),
+        },
+        "prompt_results": prompt_results,
+        "summary": summary,
+    }
+
+
+def _build_understanding_score_payload(
+    manifest: UnderstandingRunManifest,
+    item_results: list[dict[str, Any]],
+    *,
+    complete: bool,
+) -> dict[str, Any]:
+    summary = mean_metric_dict([item["metrics"] for item in item_results])
+    if manifest.task == "rec":
+        positive_values = [
+            item["metrics"]["positive_recall"]
+            for item in item_results
+            if "positive_recall" in item["metrics"]
+        ]
+        negative_values = [
+            item["metrics"]["negative_recall"]
+            for item in item_results
+            if "negative_recall" in item["metrics"]
+        ]
+        positive_recall = float(sum(positive_values) / len(positive_values)) if positive_values else 0.0
+        negative_recall = float(sum(negative_values) / len(negative_values)) if negative_values else 0.0
+        summary["positive_recall"] = positive_recall
+        summary["negative_recall"] = negative_recall
+        summary["recall"] = positive_recall
+        summary["no_recall"] = negative_recall
+        summary["weight"] = float((positive_recall + negative_recall) / 2.0)
+    summary = _attach_legacy_metric_aliases(summary)
+    return {
+        "task": manifest.task,
+        "family": manifest.family,
+        "concept": manifest.concept,
+        "token_epoch": manifest.token_epoch,
+        "model_epoch": manifest.model_epoch,
+        "adapter": manifest.adapter,
+        "complete": complete,
+        "progress": {
+            "completed": len(item_results),
+            "total": len(manifest.items),
+        },
+        "items": item_results,
+        "summary": summary,
+    }
+
+
 def _score_generation_manifest(
     manifest: RunManifest,
     clip_scorer: "SHOWOConceptClipEvaluator",
     gpt_scorer: "GPTScorer | None",
     artifact_root: Path,
+    existing_result: dict[str, Any] | None = None,
+    progress_callback: Any = None,
 ) -> dict[str, Any]:
     task_definition = TASKS[manifest.task]
-    prompt_results = []
+    existing_prompt_results = {
+        item["prompt_id"]: item
+        for item in (existing_result or {}).get("prompt_results", [])
+    }
+    prompt_results: list[dict[str, Any]] = []
 
     for prompt_artifact in manifest.prompt_artifacts:
+        if prompt_artifact.prompt_id in existing_prompt_results:
+            prompt_results.append(existing_prompt_results[prompt_artifact.prompt_id])
+            if progress_callback is not None:
+                progress_callback(
+                    _build_generation_score_payload(
+                        manifest,
+                        prompt_results,
+                        complete=(len(prompt_results) == len(manifest.prompt_artifacts)),
+                    )
+                )
+            continue
+
         prompt_dir = artifact_root / prompt_artifact.prompt_id
         image_paths = [prompt_dir / image_file for image_file in prompt_artifact.image_files]
+        clip_i_reference_image_paths = prompt_artifact.metadata.get("clip_i_reference_image_paths")
 
         clip_score = clip_scorer.score_prompt_images(
             concept=manifest.concept,
             image_paths=image_paths,
             prompt=prompt_artifact.scoring_prompt if "clip_t" in task_definition.metrics else None,
+            reference_image_paths=clip_i_reference_image_paths,
         )
 
         metrics: dict[str, float] = {}
@@ -311,10 +426,19 @@ def _score_generation_manifest(
         if "gpt" in task_definition.metrics:
             if gpt_scorer is None:
                 raise ValueError("GPT scorer was not initialized, but the task requires GPT scoring")
-            gpt_scores = [
-                gpt_scorer.score_image_prompt_alignment(image_path, prompt_artifact.scoring_prompt)
-                for image_path in image_paths
-            ]
+            if manifest.task in {"dense_gen", "dense_rea_gen"}:
+                gpt_scores = [
+                    gpt_scorer.score_dense_prompt_clause_coverage(
+                        image_path,
+                        prompt_artifact.scoring_prompt,
+                    )
+                    for image_path in image_paths
+                ]
+            else:
+                gpt_scores = [
+                    gpt_scorer.score_image_prompt_alignment(image_path, prompt_artifact.scoring_prompt)
+                    for image_path in image_paths
+                ]
             metrics["gpt"] = float(sum(gpt_scores) / len(gpt_scores))
         metrics = _attach_legacy_metric_aliases(metrics)
 
@@ -325,6 +449,7 @@ def _score_generation_manifest(
                 "generation_prompt": prompt_artifact.generation_prompt,
                 "scoring_prompt": prompt_artifact.scoring_prompt,
                 "baseline_prompt": prompt_artifact.baseline_prompt,
+                "tp_prefix_text": prompt_artifact.tp_prefix_text,
                 "conditioning_text": prompt_artifact.conditioning_text,
                 "reference_image_paths": prompt_artifact.reference_image_paths,
                 "image_files": prompt_artifact.image_files,
@@ -333,29 +458,44 @@ def _score_generation_manifest(
             }
         )
 
-    summary = mean_metric_dict([item["metrics"] for item in prompt_results])
-    summary = _attach_legacy_metric_aliases(summary)
+        if progress_callback is not None:
+            progress_callback(
+                _build_generation_score_payload(
+                    manifest,
+                    prompt_results,
+                    complete=(len(prompt_results) == len(manifest.prompt_artifacts)),
+                )
+            )
 
-    return {
-        "task": manifest.task,
-        "family": manifest.family,
-        "concept": manifest.concept,
-        "token_epoch": manifest.token_epoch,
-        "model_epoch": manifest.model_epoch,
-        "adapter": manifest.adapter,
-        "prompt_results": prompt_results,
-        "summary": summary,
-    }
+    return _build_generation_score_payload(manifest, prompt_results, complete=True)
 
 
 def _score_understanding_manifest(
     manifest: UnderstandingRunManifest,
     gpt_scorer: "GPTScorer | None",
+    existing_result: dict[str, Any] | None = None,
+    progress_callback: Any = None,
 ) -> dict[str, Any]:
     from .scorers.text_scorer import score_understanding_prediction
 
-    item_results = []
+    existing_item_results = {
+        item["item_id"]: item
+        for item in (existing_result or {}).get("items", [])
+    }
+    item_results: list[dict[str, Any]] = []
     for item in manifest.items:
+        if item.item_id in existing_item_results:
+            item_results.append(existing_item_results[item.item_id])
+            if progress_callback is not None:
+                progress_callback(
+                    _build_understanding_score_payload(
+                        manifest,
+                        item_results,
+                        complete=(len(item_results) == len(manifest.items)),
+                    )
+                )
+            continue
+
         metrics = score_understanding_prediction(
             task_name=manifest.task,
             query=item.scoring_query,
@@ -374,6 +514,7 @@ def _score_understanding_manifest(
                 "prediction": item.prediction,
                 "image_path": item.image_path,
                 "baseline_prompt": item.baseline_prompt,
+                "tp_prefix_text": item.tp_prefix_text,
                 "conditioning_text": item.conditioning_text,
                 "reference_image_paths": item.reference_image_paths,
                 "prepend_system_prompt": item.prepend_system_prompt,
@@ -382,19 +523,49 @@ def _score_understanding_manifest(
             }
         )
 
-    summary = mean_metric_dict([item["metrics"] for item in item_results])
-    summary = _attach_legacy_metric_aliases(summary)
+        if progress_callback is not None:
+            progress_callback(
+                _build_understanding_score_payload(
+                    manifest,
+                    item_results,
+                    complete=(len(item_results) == len(manifest.items)),
+                )
+            )
 
-    return {
-        "task": manifest.task,
-        "family": manifest.family,
-        "concept": manifest.concept,
-        "token_epoch": manifest.token_epoch,
-        "model_epoch": manifest.model_epoch,
-        "adapter": manifest.adapter,
-        "items": item_results,
-        "summary": summary,
-    }
+    return _build_understanding_score_payload(manifest, item_results, complete=True)
+
+
+def _write_task_summary(
+    *,
+    score_dir: Path,
+    task_definition: Any,
+    task_name: str,
+    model_epoch: int,
+    concept_results: dict[str, Any],
+) -> None:
+    summary = mean_metric_dict([concept_results[name]["summary"] for name in concept_results])
+    summary = _attach_legacy_metric_aliases(summary)
+    write_json(
+        score_dir / "summary.json",
+        {
+            "task": task_name,
+            "family": task_definition.family,
+            "model_epoch": model_epoch,
+            "concepts": {
+                name: concept_results[name]["summary"] for name in concept_results
+            },
+            "summary": summary,
+        },
+    )
+
+
+def _manifest_entry_count(path: Path, family: str) -> int | None:
+    if not path.exists():
+        return None
+    payload = load_json(path)
+    if family == "generation":
+        return len(payload.get("prompt_artifacts", []))
+    return len(payload.get("items", []))
 
 
 def run_scoring(args: argparse.Namespace, task_names: list[str], concepts: list[str]) -> None:
@@ -420,6 +591,51 @@ def run_scoring(args: argparse.Namespace, task_names: list[str], concepts: list[
                     args.epoch_to_load,
                     model_epoch,
                 )
+                manifest_entry_total = _manifest_entry_count(manifest_path, task_definition.family)
+                score_path = score_dir / f"{concept}.json"
+                if score_path.exists() and not args.overwrite:
+                    existing_score = load_json(score_path)
+                    existing_completed = existing_score.get("progress", {}).get("completed")
+                    if existing_completed is None:
+                        existing_completed = len(
+                            existing_score.get(
+                                "prompt_results" if task_definition.family == "generation" else "items",
+                                [],
+                            )
+                        )
+                    manifest_matches_existing = (
+                        manifest_entry_total is None or existing_completed == manifest_entry_total
+                    )
+                    if existing_score.get("complete", True) and manifest_matches_existing:
+                        concept_results[concept] = existing_score
+                        print(f"[resume-score] {task_name} | {concept} | epoch {model_epoch}")
+                        _write_task_summary(
+                            score_dir=score_dir,
+                            task_definition=task_definition,
+                            task_name=task_name,
+                            model_epoch=model_epoch,
+                            concept_results=concept_results,
+                        )
+                        continue
+                    if existing_score.get("complete", True) and not manifest_matches_existing:
+                        existing_score["complete"] = False
+                        existing_score["progress"] = {
+                            "completed": existing_completed,
+                            "total": manifest_entry_total,
+                        }
+                        print(
+                            f"[resume-score-stale] {task_name} | {concept} | epoch {model_epoch} | "
+                            f"{existing_completed}/{manifest_entry_total}",
+                            flush=True,
+                        )
+                    progress = existing_score.get("progress", {})
+                    print(
+                        f"[resume-score-progress] {task_name} | {concept} | epoch {model_epoch} | "
+                        f"{progress.get('completed', 0)}/{progress.get('total', '?')}",
+                        flush=True,
+                    )
+                else:
+                    existing_score = None
                 if not manifest_path.exists():
                     print(f"[skip] manifest not found: {manifest_path}")
                     continue
@@ -441,6 +657,18 @@ def run_scoring(args: argparse.Namespace, task_names: list[str], concepts: list[
                         clip_scorer=clip_scorer,
                         gpt_scorer=gpt_scorer,
                         artifact_root=manifest_path.parent,
+                        existing_result=existing_score,
+                        progress_callback=lambda partial_result, concept=concept: (
+                            concept_results.__setitem__(concept, partial_result),
+                            write_json(score_path, partial_result),
+                            _write_task_summary(
+                                score_dir=score_dir,
+                                task_definition=task_definition,
+                                task_name=task_name,
+                                model_epoch=model_epoch,
+                                concept_results=concept_results,
+                            ),
+                        ),
                     )
                 else:
                     if "gpt" in task_definition.metrics and gpt_scorer is None:
@@ -449,10 +677,29 @@ def run_scoring(args: argparse.Namespace, task_names: list[str], concepts: list[
                     result = _score_understanding_manifest(
                         manifest=manifest,
                         gpt_scorer=gpt_scorer,
+                        existing_result=existing_score,
+                        progress_callback=lambda partial_result, concept=concept: (
+                            concept_results.__setitem__(concept, partial_result),
+                            write_json(score_path, partial_result),
+                            _write_task_summary(
+                                score_dir=score_dir,
+                                task_definition=task_definition,
+                                task_name=task_name,
+                                model_epoch=model_epoch,
+                                concept_results=concept_results,
+                            ),
+                        ),
                     )
 
                 concept_results[concept] = result
-                write_json(score_dir / f"{concept}.json", result)
+                write_json(score_path, result)
+                _write_task_summary(
+                    score_dir=score_dir,
+                    task_definition=task_definition,
+                    task_name=task_name,
+                    model_epoch=model_epoch,
+                    concept_results=concept_results,
+                )
                 print(f"[scored] {task_name} | {concept} | epoch {model_epoch}")
 
             if not concept_results:

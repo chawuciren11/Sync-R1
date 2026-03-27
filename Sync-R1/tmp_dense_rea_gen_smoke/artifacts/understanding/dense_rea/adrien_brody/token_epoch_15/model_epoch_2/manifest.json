@@ -1,0 +1,25 @@
+{
+  "task": "dense_rea",
+  "family": "understanding",
+  "concept": "adrien_brody",
+  "token_epoch": 15,
+  "model_epoch": 2,
+  "adapter": "dummy",
+  "items": [
+    {
+      "item_id": "dense_rea_000",
+      "source_prompt": "A photo of <adrien_brody> wearing the clothes he runs in, enjoying a walk near his home, as it is a sunny day.",
+      "model_prompt": "",
+      "scoring_query": "A photo of <adrien_brody> wearing the clothes he runs in, enjoying a walk near his home, as it is a sunny day.",
+      "ground_truth": "A photo of <adrien_brody> wearing his blue athletic short-sleeved shirt, enjoying a walk on the beach, as it is a sunny day.",
+      "image_path": "",
+      "prediction": "A photo of <adrien_brody> wearing his blue athletic short-sleeved shirt, enjoying a walk on the beach, as it is a sunny day.",
+      "baseline_prompt": "",
+      "tp_prefix_text": null,
+      "conditioning_text": "",
+      "reference_image_paths": [],
+      "prepend_system_prompt": false,
+      "metadata": {}
+    }
+  ]
+}

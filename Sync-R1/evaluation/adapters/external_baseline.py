@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from textwrap import shorten
 from typing import Sequence
 
 from ..common import (
@@ -11,6 +12,7 @@ from ..common import (
     UnderstandingArtifact,
     UnderstandingExampleSpec,
     UnderstandingRunManifest,
+    load_json,
     set_global_seed,
     stable_seed,
     write_json,
@@ -123,7 +125,8 @@ class ExternalBaselineAdapter(BaseEvalAdapter):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         prompt_artifacts: list[PromptArtifact] = []
-        for prompt_spec in prompt_specs:
+        total_prompts = len(prompt_specs)
+        for prompt_idx, prompt_spec in enumerate(prompt_specs, start=1):
             request_seed = stable_seed(
                 self.seed,
                 self.name,
@@ -139,6 +142,7 @@ class ExternalBaselineAdapter(BaseEvalAdapter):
             prompt_dir.mkdir(parents=True, exist_ok=True)
             input_prompt = self._select_generation_prompt(prompt_spec)
             reference_images = self._select_reference_images(prompt_spec.reference_image_paths)
+            existing_images = self._existing_image_files(prompt_dir, num_images)
 
             write_json(
                 prompt_dir / "prompt.json",
@@ -147,6 +151,7 @@ class ExternalBaselineAdapter(BaseEvalAdapter):
                     "source_prompt": prompt_spec.source_prompt,
                     "generation_prompt": prompt_spec.generation_prompt,
                     "baseline_prompt": prompt_spec.baseline_prompt,
+                    "tp_prefix_text": prompt_spec.tp_prefix_text,
                     "input_prompt": input_prompt,
                     "conditioning_text": prompt_spec.conditioning_text,
                     "reference_image_paths": reference_images,
@@ -157,18 +162,34 @@ class ExternalBaselineAdapter(BaseEvalAdapter):
                 },
             )
 
-            image_files = self._generate_images_for_prompt(
-                task_name=task_name,
-                concept=concept,
-                prompt_spec=prompt_spec,
-                input_prompt=input_prompt,
-                reference_image_paths=reference_images,
-                prompt_dir=prompt_dir,
-                model_epoch=model_epoch,
-                num_images=num_images,
-                batch_size=batch_size,
-                seed=request_seed,
-            )
+            if not overwrite and len(existing_images) >= num_images:
+                image_files = existing_images[:num_images]
+                print(
+                    f"[resume] {self.name} | gen | {task_name} | {concept} | epoch {model_epoch} | "
+                    f"{prompt_idx}/{total_prompts} | {prompt_spec.prompt_id} | "
+                    f"images {len(image_files)}/{num_images} | {self._short_log_text(input_prompt)}",
+                    flush=True,
+                )
+            else:
+                status = "resume" if existing_images and not overwrite else "start"
+                print(
+                    f"[{status}] {self.name} | gen | {task_name} | {concept} | epoch {model_epoch} | "
+                    f"{prompt_idx}/{total_prompts} | {prompt_spec.prompt_id} | "
+                    f"images {len(existing_images)}/{num_images} | {self._short_log_text(input_prompt)}",
+                    flush=True,
+                )
+                image_files = self._generate_images_for_prompt(
+                    task_name=task_name,
+                    concept=concept,
+                    prompt_spec=prompt_spec,
+                    input_prompt=input_prompt,
+                    reference_image_paths=reference_images,
+                    prompt_dir=prompt_dir,
+                    model_epoch=model_epoch,
+                    num_images=num_images,
+                    batch_size=batch_size,
+                    seed=request_seed,
+                )
             prompt_artifacts.append(
                 PromptArtifact(
                     prompt_id=prompt_spec.prompt_id,
@@ -176,6 +197,7 @@ class ExternalBaselineAdapter(BaseEvalAdapter):
                     generation_prompt=input_prompt,
                     scoring_prompt=prompt_spec.scoring_prompt,
                     baseline_prompt=prompt_spec.baseline_prompt,
+                    tp_prefix_text=prompt_spec.tp_prefix_text,
                     conditioning_text=prompt_spec.conditioning_text,
                     reference_image_paths=reference_images,
                     image_files=image_files,
@@ -186,6 +208,13 @@ class ExternalBaselineAdapter(BaseEvalAdapter):
                         "seed": request_seed,
                     },
                 )
+            )
+            self._write_generation_manifest(
+                output_dir=output_dir,
+                task_name=task_name,
+                concept=concept,
+                model_epoch=model_epoch,
+                prompt_artifacts=prompt_artifacts,
             )
 
         manifest = RunManifest(
@@ -218,7 +247,8 @@ class ExternalBaselineAdapter(BaseEvalAdapter):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         items: list[UnderstandingArtifact] = []
-        for example in example_specs:
+        total_examples = len(example_specs)
+        for example_idx, example in enumerate(example_specs, start=1):
             request_seed = stable_seed(
                 self.seed,
                 self.name,
@@ -231,38 +261,60 @@ class ExternalBaselineAdapter(BaseEvalAdapter):
             set_global_seed(request_seed)
             input_prompt = self._select_understanding_prompt(example)
             reference_images = self._select_reference_images(example.reference_image_paths)
-            prediction = self._predict_text_for_example(
+            item_path = output_dir / f"{example.item_id}.json"
+            if not overwrite and item_path.exists():
+                artifact = UnderstandingArtifact(**load_json(item_path))
+                print(
+                    f"[resume] {self.name} | und | {task_name} | {concept} | epoch {model_epoch} | "
+                    f"{example_idx}/{total_examples} | {example.item_id} | {self._short_log_text(example.scoring_query)}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[run] {self.name} | und | {task_name} | {concept} | epoch {model_epoch} | "
+                    f"{example_idx}/{total_examples} | {example.item_id} | {self._short_log_text(example.scoring_query)}",
+                    flush=True,
+                )
+                prediction = self._predict_text_for_example(
+                    task_name=task_name,
+                    concept=concept,
+                    example=example,
+                    input_prompt=input_prompt,
+                    reference_image_paths=reference_images,
+                    model_epoch=model_epoch,
+                    top_k=top_k,
+                    max_new_tokens=max_new_tokens,
+                    seed=request_seed,
+                )
+                artifact = UnderstandingArtifact(
+                    item_id=example.item_id,
+                    source_prompt=example.source_prompt,
+                    model_prompt=input_prompt,
+                    scoring_query=example.scoring_query,
+                    ground_truth=example.ground_truth,
+                    image_path=example.image_path,
+                    prediction=prediction,
+                    baseline_prompt=example.baseline_prompt,
+                    tp_prefix_text=example.tp_prefix_text,
+                    conditioning_text=example.conditioning_text,
+                    reference_image_paths=reference_images,
+                    prepend_system_prompt=example.prepend_system_prompt,
+                    metadata={
+                        **example.metadata,
+                        "prompt_mode": self.prompt_mode,
+                        "model_family": self.model_family,
+                        "seed": request_seed,
+                    },
+                )
+                write_json(item_path, artifact.__dict__)
+            items.append(artifact)
+            self._write_understanding_manifest(
+                output_dir=output_dir,
                 task_name=task_name,
                 concept=concept,
-                example=example,
-                input_prompt=input_prompt,
-                reference_image_paths=reference_images,
                 model_epoch=model_epoch,
-                top_k=top_k,
-                max_new_tokens=max_new_tokens,
-                seed=request_seed,
+                items=items,
             )
-            artifact = UnderstandingArtifact(
-                item_id=example.item_id,
-                source_prompt=example.source_prompt,
-                model_prompt=input_prompt,
-                scoring_query=example.scoring_query,
-                ground_truth=example.ground_truth,
-                image_path=example.image_path,
-                prediction=prediction,
-                baseline_prompt=example.baseline_prompt,
-                conditioning_text=example.conditioning_text,
-                reference_image_paths=reference_images,
-                prepend_system_prompt=example.prepend_system_prompt,
-                metadata={
-                    **example.metadata,
-                    "prompt_mode": self.prompt_mode,
-                    "model_family": self.model_family,
-                    "seed": request_seed,
-                },
-            )
-            items.append(artifact)
-            write_json(output_dir / f"{example.item_id}.json", artifact.__dict__)
 
         manifest = UnderstandingRunManifest(
             task=task_name,
@@ -276,15 +328,76 @@ class ExternalBaselineAdapter(BaseEvalAdapter):
         write_json(output_dir / "manifest.json", manifest.to_dict())
         return manifest
 
+    def _existing_image_files(self, prompt_dir: Path, num_images: int) -> list[str]:
+        image_files: list[str] = []
+        for image_idx in range(num_images):
+            image_name = f"image_{image_idx:03d}.png"
+            if (prompt_dir / image_name).exists():
+                image_files.append(image_name)
+        return image_files
+
+    def _write_generation_manifest(
+        self,
+        *,
+        output_dir: Path,
+        task_name: str,
+        concept: str,
+        model_epoch: int,
+        prompt_artifacts: Sequence[PromptArtifact],
+    ) -> None:
+        manifest = RunManifest(
+            task=task_name,
+            family="generation",
+            concept=concept,
+            token_epoch=self.epoch_to_load,
+            model_epoch=model_epoch,
+            adapter=self.name,
+            prompt_artifacts=list(prompt_artifacts),
+        )
+        write_json(output_dir / "manifest.json", manifest.to_dict())
+
+    def _write_understanding_manifest(
+        self,
+        *,
+        output_dir: Path,
+        task_name: str,
+        concept: str,
+        model_epoch: int,
+        items: Sequence[UnderstandingArtifact],
+    ) -> None:
+        manifest = UnderstandingRunManifest(
+            task=task_name,
+            family="understanding",
+            concept=concept,
+            token_epoch=self.epoch_to_load,
+            model_epoch=model_epoch,
+            adapter=self.name,
+            items=list(items),
+        )
+        write_json(output_dir / "manifest.json", manifest.to_dict())
+
+    def _short_log_text(self, text: str | None, width: int = 140) -> str:
+        if not text:
+            return "-"
+        normalized = " ".join(str(text).split())
+        return shorten(normalized, width=width, placeholder="...")
+
+    def _apply_tp_prefix(self, prefix_text: str | None, prompt_text: str) -> str:
+        if not prefix_text:
+            return prompt_text
+        return f"{prefix_text}\n{prompt_text}"
+
     def _select_generation_prompt(self, prompt_spec: PromptSpec) -> str:
-        if self.prompt_mode == "ip":
-            return prompt_spec.baseline_prompt or prompt_spec.scoring_prompt or prompt_spec.source_prompt
-        return prompt_spec.baseline_prompt or prompt_spec.scoring_prompt or prompt_spec.generation_prompt
+        prompt_text = prompt_spec.source_prompt
+        if self.prompt_mode == "tp":
+            return self._apply_tp_prefix(prompt_spec.tp_prefix_text, prompt_text)
+        return prompt_text
 
     def _select_understanding_prompt(self, example: UnderstandingExampleSpec) -> str:
-        if self.prompt_mode == "ip":
-            return example.baseline_prompt or example.source_prompt
-        return example.baseline_prompt or example.model_prompt
+        prompt_text = example.model_prompt
+        if self.prompt_mode == "tp":
+            return self._apply_tp_prefix(example.tp_prefix_text, prompt_text)
+        return prompt_text
 
     def _select_reference_images(self, reference_image_paths: Sequence[str]) -> list[str]:
         if self.prompt_mode != "ip":

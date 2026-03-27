@@ -51,6 +51,11 @@ class BagelAdapterBase(ExternalBaselineAdapter):
 
         image_files: list[str] = []
         for image_idx in range(num_images):
+            image_name = f"image_{image_idx:03d}.png"
+            image_path = prompt_dir / image_name
+            if image_path.exists():
+                image_files.append(image_name)
+                continue
             sample_seed = stable_seed(seed, "bagel_image", image_idx)
             set_global_seed(sample_seed)
             inputs = self._build_generation_inputs(
@@ -59,8 +64,7 @@ class BagelAdapterBase(ExternalBaselineAdapter):
                 reference_image_paths=reference_image_paths,
             )
             image = self._run_generation(inputs)
-            image_name = f"image_{image_idx:03d}.png"
-            image.save(prompt_dir / image_name)
+            image.save(image_path)
             image_files.append(image_name)
             self._cleanup_cuda()
         return image_files
@@ -128,6 +132,8 @@ class BagelAdapterBase(ExternalBaselineAdapter):
         reference_image_paths: Sequence[str],
     ) -> list[Any]:
         inputs: list[Any] = []
+        if prompt_spec.conditioning_text:
+            inputs.append(prompt_spec.conditioning_text)
         if reference_image_paths:
             inputs.append(self._load_image(reference_image_paths[0]))
         inputs.append(input_prompt)
@@ -141,10 +147,10 @@ class BagelAdapterBase(ExternalBaselineAdapter):
         reference_image_paths: Sequence[str],
     ) -> list[Any]:
         inputs: list[Any] = []
+        if example.conditioning_text:
+            inputs.append(example.conditioning_text)
         if reference_image_paths:
             inputs.append(self._load_image(reference_image_paths[0]))
-            if example.conditioning_text:
-                inputs.append(example.conditioning_text)
 
         if self._should_use_target_image(example.image_path):
             inputs.append(self._load_image(example.image_path))

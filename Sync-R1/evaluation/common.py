@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
@@ -27,6 +28,7 @@ class PromptSpec:
     generation_prompt: str
     scoring_prompt: str
     baseline_prompt: str | None = None
+    tp_prefix_text: str | None = None
     conditioning_text: str | None = None
     reference_image_paths: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -39,9 +41,10 @@ class PromptArtifact:
     generation_prompt: str
     scoring_prompt: str
     baseline_prompt: str | None
-    conditioning_text: str | None
-    reference_image_paths: list[str]
-    image_files: list[str]
+    tp_prefix_text: str | None = None
+    conditioning_text: str | None = None
+    reference_image_paths: list[str] = field(default_factory=list)
+    image_files: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -90,6 +93,7 @@ class UnderstandingExampleSpec:
     ground_truth: str
     image_path: str
     baseline_prompt: str | None = None
+    tp_prefix_text: str | None = None
     conditioning_text: str | None = None
     reference_image_paths: list[str] = field(default_factory=list)
     prepend_system_prompt: bool = True
@@ -106,6 +110,7 @@ class UnderstandingArtifact:
     image_path: str
     prediction: str
     baseline_prompt: str | None = None
+    tp_prefix_text: str | None = None
     conditioning_text: str | None = None
     reference_image_paths: list[str] = field(default_factory=list)
     prepend_system_prompt: bool = True
@@ -154,8 +159,10 @@ def load_json(path: str | Path) -> Any:
 def write_json(path: str | Path, payload: Any) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    with tmp_path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, path)
 
 
 def build_adj_token_string(concept: str, stage_1_tokens: int, stage_2_tokens: int) -> str:
@@ -185,6 +192,14 @@ def build_simple_conditioning_text(
     return f"Reference {class_name}."
 
 
+def build_tp_prefix_text(concept: str, train_info: dict[str, Any]) -> str:
+    return f"name: {concept}\ninfo: {train_info['info']}"
+
+
+def build_ip_prefix_text(concept: str) -> str:
+    return f"a photo of {concept}"
+
+
 def load_reference_image_paths(
     data_root: str | Path,
     concept: str,
@@ -197,6 +212,23 @@ def load_reference_image_paths(
         str(data_root / "concept" / "train" / concept / image_name)
         for image_name in image_names
     ]
+
+
+def load_test_ground_truth_image_paths(
+    data_root: str | Path,
+    concept: str,
+    count: int = 1,
+) -> list[str]:
+    data_root = Path(data_root)
+    test_dir = data_root / "concept" / "test" / concept
+    image_paths = sorted(
+        path
+        for path in test_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+    )
+    if not image_paths:
+        raise FileNotFoundError(f"No ground-truth test images found for concept: {concept}")
+    return [str(path) for path in image_paths[:count]]
 
 
 def resolve_dataset_path(data_root: str | Path, raw_path: str | Path) -> Path:

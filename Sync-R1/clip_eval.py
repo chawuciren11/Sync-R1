@@ -124,8 +124,9 @@ class SHOWOConceptClipEvaluator:
         concept: str,
         image_paths: Sequence[str | Path] | str | Path,
         prompt: str | None = None,
+        reference_image_paths: Sequence[str | Path] | str | Path | None = None,
     ) -> ClipScore:
-        ref_paths = self.reference_paths(concept)
+        ref_paths = _as_path_list(reference_image_paths) if reference_image_paths else self.reference_paths(concept)
         clip_i = self.clip.image_to_image_similarity(ref_paths, image_paths)
         clip_t = None
         if prompt:

@@ -1,0 +1,55 @@
+{
+  "task": "rea",
+  "family": "understanding",
+  "concept": "adrien_brody",
+  "token_epoch": 15,
+  "model_epoch": 2,
+  "adapter": "dummy",
+  "items": [
+    {
+      "item_id": "rea_000",
+      "source_prompt": "A photo of <adrien_brody> running.",
+      "model_prompt": "",
+      "scoring_query": "A photo of <adrien_brody> running.",
+      "ground_truth": "A photo of <adrien_brody> wearing a blue athletic short-sleeved shirt while running.",
+      "image_path": "",
+      "prediction": "A photo of <adrien_brody> wearing a blue athletic short-sleeved shirt while running.",
+      "baseline_prompt": "",
+      "tp_prefix_text": null,
+      "conditioning_text": "",
+      "reference_image_paths": [],
+      "prepend_system_prompt": false,
+      "metadata": {}
+    },
+    {
+      "item_id": "rea_001",
+      "source_prompt": "A photo of <adrien_brody> walking on near his house.",
+      "model_prompt": "",
+      "scoring_query": "A photo of <adrien_brody> walking on near his house.",
+      "ground_truth": "A photo of <adrien_brody> walking on the beach near his home.",
+      "image_path": "",
+      "prediction": "A photo of <adrien_brody> walking on the beach near his home.",
+      "baseline_prompt": "",
+      "tp_prefix_text": null,
+      "conditioning_text": "",
+      "reference_image_paths": [],
+      "prepend_system_prompt": false,
+      "metadata": {}
+    },
+    {
+      "item_id": "rea_002",
+      "source_prompt": "A photo of <adrien_brody> at work, showing his company logo.",
+      "model_prompt": "",
+      "scoring_query": "A photo of <adrien_brody> at work, showing his company logo.",
+      "ground_truth": "A photo of <adrien_brody> at Apple Inc., with the Apple logo visible.",
+      "image_path": "",
+      "prediction": "A photo of <adrien_brody> at Apple Inc., with the Apple logo visible.",
+      "baseline_prompt": "",
+      "tp_prefix_text": null,
+      "conditioning_text": "",
+      "reference_image_paths": [],
+      "prepend_system_prompt": false,
+      "metadata": {}
+    }
+  ]
+}

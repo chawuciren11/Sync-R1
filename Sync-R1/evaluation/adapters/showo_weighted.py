@@ -4,6 +4,7 @@ import copy
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from textwrap import shorten
 from typing import Any, Sequence
 
 import numpy as np
@@ -28,6 +29,7 @@ from ..common import (
     UnderstandingExampleSpec,
     UnderstandingRunManifest,
     build_showo_system_prompt,
+    load_json,
     set_global_seed,
     stable_seed,
     write_json,
@@ -132,42 +134,73 @@ class ShowoWeightedAdapter(BaseEvalAdapter):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         prompt_artifacts: list[PromptArtifact] = []
-        for prompt in prompt_specs:
-            set_global_seed(stable_seed(self.seed, self.name, "generation", task_name, concept, model_epoch, prompt.prompt_id))
+        total_prompts = len(prompt_specs)
+        for prompt_idx, prompt in enumerate(prompt_specs, start=1):
+            request_seed = stable_seed(self.seed, self.name, "generation", task_name, concept, model_epoch, prompt.prompt_id)
+            set_global_seed(request_seed)
             prompt_dir = output_dir / prompt.prompt_id
             prompt_dir.mkdir(parents=True, exist_ok=True)
+            existing_images = self._existing_image_files(prompt_dir, num_images)
+            input_prompt = self._apply_tp_prefix(prompt.tp_prefix_text, prompt.generation_prompt)
             write_json(
                 prompt_dir / "prompt.json",
                 {
                     "prompt_id": prompt.prompt_id,
                     "source_prompt": prompt.source_prompt,
                     "generation_prompt": prompt.generation_prompt,
+                    "input_prompt": input_prompt,
                     "scoring_prompt": prompt.scoring_prompt,
                     "baseline_prompt": prompt.baseline_prompt,
+                    "tp_prefix_text": prompt.tp_prefix_text,
                     "conditioning_text": prompt.conditioning_text,
                     "reference_image_paths": prompt.reference_image_paths,
                     "metadata": prompt.metadata,
+                    "seed": request_seed,
                 },
             )
-            image_files = self._generate_prompt_images(
-                runtime=runtime,
-                prompt_text=prompt.generation_prompt,
-                prompt_dir=prompt_dir,
-                num_images=num_images,
-                batch_size=batch_size,
-            )
+            if not overwrite and len(existing_images) >= num_images:
+                image_files = existing_images[:num_images]
+                print(
+                    f"[resume] {self.name} | gen | {task_name} | {concept} | epoch {model_epoch} | "
+                    f"{prompt_idx}/{total_prompts} | {prompt.prompt_id} | "
+                    f"images {len(image_files)}/{num_images} | {self._short_log_text(input_prompt)}",
+                    flush=True,
+                )
+            else:
+                status = "resume" if existing_images and not overwrite else "start"
+                print(
+                    f"[{status}] {self.name} | gen | {task_name} | {concept} | epoch {model_epoch} | "
+                    f"{prompt_idx}/{total_prompts} | {prompt.prompt_id} | "
+                    f"images {len(existing_images)}/{num_images} | {self._short_log_text(input_prompt)}",
+                    flush=True,
+                )
+                image_files = self._generate_prompt_images(
+                    runtime=runtime,
+                    prompt_text=input_prompt,
+                    prompt_dir=prompt_dir,
+                    num_images=num_images,
+                    batch_size=batch_size,
+                )
             prompt_artifacts.append(
                 PromptArtifact(
                     prompt_id=prompt.prompt_id,
                     source_prompt=prompt.source_prompt,
-                    generation_prompt=prompt.generation_prompt,
+                    generation_prompt=input_prompt,
                     scoring_prompt=prompt.scoring_prompt,
                     baseline_prompt=prompt.baseline_prompt,
+                    tp_prefix_text=prompt.tp_prefix_text,
                     conditioning_text=prompt.conditioning_text,
                     reference_image_paths=prompt.reference_image_paths,
                     image_files=image_files,
                     metadata=prompt.metadata,
                 )
+            )
+            self._write_generation_manifest(
+                output_dir=output_dir,
+                task_name=task_name,
+                concept=concept,
+                model_epoch=model_epoch,
+                prompt_artifacts=prompt_artifacts,
             )
 
         manifest = RunManifest(
@@ -201,31 +234,57 @@ class ShowoWeightedAdapter(BaseEvalAdapter):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         items: list[UnderstandingArtifact] = []
-        for example in example_specs:
-            set_global_seed(stable_seed(self.seed, self.name, "understanding", task_name, concept, model_epoch, example.item_id))
-            prediction = self._predict_text(
-                runtime=runtime,
-                concept=concept,
-                example=example,
-                top_k=top_k,
-                max_new_tokens=max_new_tokens,
-            )
-            artifact = UnderstandingArtifact(
-                item_id=example.item_id,
-                source_prompt=example.source_prompt,
-                model_prompt=example.model_prompt,
-                scoring_query=example.scoring_query,
-                ground_truth=example.ground_truth,
-                image_path=example.image_path,
-                prediction=prediction,
-                baseline_prompt=example.baseline_prompt,
-                conditioning_text=example.conditioning_text,
-                reference_image_paths=example.reference_image_paths,
-                prepend_system_prompt=example.prepend_system_prompt,
-                metadata=example.metadata,
-            )
+        total_examples = len(example_specs)
+        for example_idx, example in enumerate(example_specs, start=1):
+            request_seed = stable_seed(self.seed, self.name, "understanding", task_name, concept, model_epoch, example.item_id)
+            set_global_seed(request_seed)
+            item_path = output_dir / f"{example.item_id}.json"
+            if not overwrite and item_path.exists():
+                artifact = UnderstandingArtifact(**load_json(item_path))
+                print(
+                    f"[resume] {self.name} | und | {task_name} | {concept} | epoch {model_epoch} | "
+                    f"{example_idx}/{total_examples} | {example.item_id} | {self._short_log_text(example.scoring_query)}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[run] {self.name} | und | {task_name} | {concept} | epoch {model_epoch} | "
+                    f"{example_idx}/{total_examples} | {example.item_id} | {self._short_log_text(example.scoring_query)}",
+                    flush=True,
+                )
+                input_prompt = self._apply_tp_prefix(example.tp_prefix_text, example.model_prompt)
+                prediction = self._predict_text(
+                    runtime=runtime,
+                    concept=concept,
+                    example=example,
+                    prompt_text=input_prompt,
+                    top_k=top_k,
+                    max_new_tokens=max_new_tokens,
+                )
+                artifact = UnderstandingArtifact(
+                    item_id=example.item_id,
+                    source_prompt=example.source_prompt,
+                    model_prompt=input_prompt,
+                    scoring_query=example.scoring_query,
+                    ground_truth=example.ground_truth,
+                    image_path=example.image_path,
+                    prediction=prediction,
+                    baseline_prompt=example.baseline_prompt,
+                    tp_prefix_text=example.tp_prefix_text,
+                    conditioning_text=example.conditioning_text,
+                    reference_image_paths=example.reference_image_paths,
+                    prepend_system_prompt=example.prepend_system_prompt,
+                    metadata=example.metadata,
+                )
+                write_json(item_path, artifact.__dict__)
             items.append(artifact)
-            write_json(output_dir / f"{example.item_id}.json", artifact.__dict__)
+            self._write_understanding_manifest(
+                output_dir=output_dir,
+                task_name=task_name,
+                concept=concept,
+                model_epoch=model_epoch,
+                items=items,
+            )
 
         manifest = UnderstandingRunManifest(
             task=task_name,
@@ -248,6 +307,65 @@ class ShowoWeightedAdapter(BaseEvalAdapter):
         self._cache_key = cache_key
         self._cache_runtime = runtime
         return runtime
+
+    def _existing_image_files(self, prompt_dir: Path, num_images: int) -> list[str]:
+        image_files: list[str] = []
+        for image_idx in range(num_images):
+            image_name = f"image_{image_idx:03d}.png"
+            if (prompt_dir / image_name).exists():
+                image_files.append(image_name)
+        return image_files
+
+    def _write_generation_manifest(
+        self,
+        *,
+        output_dir: Path,
+        task_name: str,
+        concept: str,
+        model_epoch: int,
+        prompt_artifacts: Sequence[PromptArtifact],
+    ) -> None:
+        manifest = RunManifest(
+            task=task_name,
+            family="generation",
+            concept=concept,
+            token_epoch=self.epoch_to_load,
+            model_epoch=model_epoch,
+            adapter=self.name,
+            prompt_artifacts=list(prompt_artifacts),
+        )
+        write_json(output_dir / "manifest.json", manifest.to_dict())
+
+    def _write_understanding_manifest(
+        self,
+        *,
+        output_dir: Path,
+        task_name: str,
+        concept: str,
+        model_epoch: int,
+        items: Sequence[UnderstandingArtifact],
+    ) -> None:
+        manifest = UnderstandingRunManifest(
+            task=task_name,
+            family="understanding",
+            concept=concept,
+            token_epoch=self.epoch_to_load,
+            model_epoch=model_epoch,
+            adapter=self.name,
+            items=list(items),
+        )
+        write_json(output_dir / "manifest.json", manifest.to_dict())
+
+    def _short_log_text(self, text: str | None, width: int = 140) -> str:
+        if not text:
+            return "-"
+        normalized = " ".join(str(text).split())
+        return shorten(normalized, width=width, placeholder="...")
+
+    def _apply_tp_prefix(self, prefix_text: str | None, prompt_text: str) -> str:
+        if not prefix_text:
+            return prompt_text
+        return f"{prefix_text}\n{prompt_text}"
 
     def _load_runtime(self, concept: str, model_epoch: int) -> _Runtime:
         config = OmegaConf.load(self.config_file)
@@ -416,8 +534,11 @@ class ShowoWeightedAdapter(BaseEvalAdapter):
         else:
             mask_schedule = get_mask_chedule(config.training.get("mask_schedule", "cosine"))
 
-        image_files: list[str] = []
         generated_count = 0
+        while generated_count < num_images and (prompt_dir / f"image_{generated_count:03d}.png").exists():
+            generated_count += 1
+
+        image_files = [f"image_{image_idx:03d}.png" for image_idx in range(generated_count)]
 
         while generated_count < num_images:
             actual_batch_size = min(batch_size, num_images - generated_count)
@@ -483,6 +604,7 @@ class ShowoWeightedAdapter(BaseEvalAdapter):
         runtime: _Runtime,
         concept: str,
         example: UnderstandingExampleSpec,
+        prompt_text: str,
         top_k: int,
         max_new_tokens: int,
     ) -> str:
@@ -490,10 +612,11 @@ class ShowoWeightedAdapter(BaseEvalAdapter):
         uni_prompting = runtime.uni_prompting
         vq_model = runtime.vq_model
         model = runtime.model
-
-        prompt_text = example.model_prompt
         if example.prepend_system_prompt:
-            prompt_text = build_showo_system_prompt(concept, self.nums_new_token_i_stage_1) + prompt_text
+            prompt_text = self._apply_tp_prefix(
+                example.tp_prefix_text,
+                build_showo_system_prompt(concept, self.nums_new_token_i_stage_1) + example.model_prompt,
+            )
 
         image = Image.open(example.image_path).convert("RGB")
         image = personalized_image_transform(
