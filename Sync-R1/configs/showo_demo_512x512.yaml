@@ -1,0 +1,51 @@
+wandb:
+  entity: null
+  resume: 'auto'
+
+experiment:
+    project: "demo"
+    name: "show-o-demo"
+    output_dir: "show-o-demo"
+
+model:
+    vq_model:
+        type: "magvitv2"
+        vq_model_name: "/root/.cache/huggingface/hub/models--showlab--magvitv2/snapshots/5c3fa78f8b3523347c5cd1a4c97f3c4e96f33d5d"
+
+    showo:
+        pretrained_model_path: "/root/.cache/huggingface/hub/models--showlab--show-o-512x512/snapshots/dbe757d951099968fb102d249d35a764528df2dd"
+        w_clip_vit: False
+        vocab_size: 58498
+        llm_vocab_size: 50295
+        llm_model_path: "/root/.cache/huggingface/hub/models--microsoft--phi-1_5/snapshots/675aa382d814580b22651a30acb1a585d7c25963"
+        codebook_size: 8192
+        num_vq_tokens: 1024
+        num_new_special_tokens: 10  # <|soi|> <|eoi|> <|sov|> <|eov|> <|t2i|> <|mmu|> <|t2v|> <|v2v|> <|lvg|> <|pad|>
+
+    gradient_checkpointing: True
+
+dataset:
+    gen_type: "t2i"
+    und_type: "captioning"
+    params:
+        batch_size: ${training.batch_size}
+        shuffle_buffer_size: 1000
+        num_workers: 32
+        resolution: 512
+        pin_memory: True
+        persistent_workers: True
+
+    preprocessing:
+        max_seq_length: 128
+        resolution: 512
+        center_crop: False
+        random_flip: False
+
+training:
+    gradient_accumulation_steps: 1
+    cond_dropout_prob: 0.1
+    batch_size: 20
+    min_masking_rate: 0.0
+    checkpoint_dir: "/home/daigaole/code/ex/showo_feat/ckpt"
+
+clip_path: "openai/clip-vit-large-patch14"

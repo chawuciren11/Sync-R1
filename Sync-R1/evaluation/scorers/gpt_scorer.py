@@ -1,0 +1,110 @@
+from __future__ import annotations
+
+import base64
+import os
+import re
+from pathlib import Path
+
+from openai import OpenAI
+
+
+def _extract_score(text: str) -> float:
+    match = re.search(r"(-?\d+(?:\.\d+)?)", text)
+    if not match:
+        raise ValueError(f"Could not parse score from response: {text}")
+    score = float(match.group(1))
+    return max(0.0, min(1.0, score))
+
+
+def _split_prompt(prompt: str) -> list[str]:
+    clauses = re.split(r"[,.!?;:()\[\]{}<>/\\-]+", prompt)
+    return [clause.strip() for clause in clauses if clause.strip()]
+
+
+class GPTScorer:
+    """OpenAI-compatible multimodal/text judge used by both evaluation families."""
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        temperature: float = 1e-5,
+        max_tokens: int = 64,
+        timeout: float = 120.0,
+    ) -> None:
+        api_key = api_key or os.getenv("OPENAI_API_KEY")
+        base_url = base_url or os.getenv("OPENAI_BASE_URL")
+        if not api_key:
+            raise ValueError("GPT scoring requires --gpt-api-key or OPENAI_API_KEY")
+
+        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+    def score_image_prompt_alignment(self, image_path: str | Path, prompt: str) -> float:
+        clauses = _split_prompt(prompt)
+        if not clauses:
+            return 0.0
+
+        scores = [self._score_single_image_clause(image_path, clause) for clause in clauses]
+        return float(sum(scores) / len(scores))
+
+    def score_text_answer(self, query: str, reference: str, prediction: str) -> float:
+        system_prompt = (
+            "You are a score evaluator. Given a question, a reference answer, and a predicted answer, "
+            "you need to give a score from {0, 0.5, 1}. "
+            "0 means completely irrelevant, 1 means completely relevant, and 0.5 means partially relevant. "
+            "Ignore grammar and focus only on whether the correct content is answered. "
+            "Return only the numeric score."
+        )
+        user_prompt = (
+            f"Question: {query}\n"
+            f"Reference answer: {reference}\n"
+            f"Predicted answer: {prediction}"
+        )
+        response = self.client.chat.completions.create(
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        content = response.choices[0].message.content or ""
+        return _extract_score(content)
+
+    def _score_single_image_clause(self, image_path: str | Path, clause: str) -> float:
+        image_path = Path(image_path)
+        mime_type = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
+        encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+        image_url = f"data:{mime_type};base64,{encoded}"
+
+        system_prompt = (
+            "You are a professional image evaluator. "
+            "Determine whether the text fragment is reflected in the image. "
+            "Return only one score from {0, 0.5, 1}. "
+            "1 means fully reflected, 0.5 means partially reflected, and 0 means not reflected."
+        )
+        user_prompt = f"Text fragment: {clause}"
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_prompt},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                },
+            ],
+        )
+        content = response.choices[0].message.content or ""
+        return _extract_score(content)
