@@ -616,6 +616,10 @@ class JanusAdapterBase(ExternalBaselineAdapter):
         project_root = Path(self.config_file).resolve().parents[1]
         return project_root / "tmp_janus_offload" / self.name
 
+    def _should_use_target_image(self, image_path: str | Path) -> bool:
+        path = Path(image_path)
+        return path.exists() and not path.name.startswith("black_")
+
     def _cleanup_cuda(self) -> None:
         gc.collect()
         if torch.cuda.is_available():
