@@ -16,6 +16,14 @@ def _extract_score(text: str) -> float:
     return max(0.0, min(1.0, score))
 
 
+def _sanitize_visual_text(text: str) -> str:
+    sanitized = re.sub(r"<[^>]+>", "the subject", text)
+    sanitized = re.sub(r"\s+", " ", sanitized).strip()
+    if sanitized.lower().startswith("a photo of the subject "):
+        return sanitized
+    return sanitized
+
+
 def _split_prompt(prompt: str) -> list[str]:
     clauses = re.split(r"[,.!?;:()\[\]{}<>/\\-]+", prompt)
     return [clause.strip() for clause in clauses if clause.strip()]
@@ -47,6 +55,24 @@ class GPTScorer:
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+
+    def _parse_score_or_default(
+        self,
+        content: str,
+        *,
+        default: float,
+        context: str,
+    ) -> float:
+        try:
+            return _extract_score(content)
+        except ValueError:
+            normalized = " ".join(content.split()) if content else "<empty>"
+            print(
+                f"[warn] GPT scorer returned a non-numeric response for {context}; "
+                f"defaulting to {default}. response={normalized}",
+                flush=True,
+            )
+            return default
 
     def score_image_prompt_alignment(self, image_path: str | Path, prompt: str) -> float:
         clauses = _split_prompt(prompt)
@@ -87,7 +113,7 @@ class GPTScorer:
             ],
         )
         content = response.choices[0].message.content or ""
-        return _extract_score(content)
+        return self._parse_score_or_default(content, default=0.0, context="text_answer")
 
     def score_prompt_similarity(
         self,
@@ -120,21 +146,24 @@ class GPTScorer:
             ],
         )
         content = response.choices[0].message.content or ""
-        return _extract_score(content)
+        return self._parse_score_or_default(content, default=0.0, context="prompt_similarity")
 
     def _score_single_image_clause(self, image_path: str | Path, clause: str) -> float:
         image_path = Path(image_path)
         mime_type = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
         encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
         image_url = f"data:{mime_type};base64,{encoded}"
+        sanitized_clause = _sanitize_visual_text(clause)
 
         system_prompt = (
             "You are a professional image evaluator. "
             "Determine whether the text fragment is reflected in the image. "
+            "Do not identify who is in the image or infer identity. "
+            "If a fragment mentions a specific name or token, treat it only as referring to the same subject in the image. "
             "Return only one score from {0, 0.5, 1}. "
             "1 means fully reflected, 0.5 means partially reflected, and 0 means not reflected."
         )
-        user_prompt = f"Text fragment: {clause}"
+        user_prompt = f"Text fragment: {sanitized_clause}"
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -152,21 +181,28 @@ class GPTScorer:
             ],
         )
         content = response.choices[0].message.content or ""
-        return _extract_score(content)
+        return self._parse_score_or_default(
+            content,
+            default=0.0,
+            context=f"image_clause:{sanitized_clause}",
+        )
 
     def _score_single_image_clause_binary(self, image_path: str | Path, clause: str) -> float:
         image_path = Path(image_path)
         mime_type = "image/png" if image_path.suffix.lower() == ".png" else "image/jpeg"
         encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
         image_url = f"data:{mime_type};base64,{encoded}"
+        sanitized_clause = _sanitize_visual_text(clause)
 
         system_prompt = (
             "You are a professional image evaluator. "
             "Determine whether the image clearly presents the described text clause. "
+            "Do not identify who is in the image or infer identity. "
+            "If a clause mentions a specific name or token, treat it only as referring to the same subject in the image. "
             "Return only one score from {0, 1}. "
             "1 means the clause is clearly present in the image, and 0 means it is not present or too uncertain."
         )
-        user_prompt = f"Text clause: {clause}"
+        user_prompt = f"Text clause: {sanitized_clause}"
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -184,4 +220,9 @@ class GPTScorer:
             ],
         )
         content = response.choices[0].message.content or ""
-        return 1.0 if _extract_score(content) >= 0.5 else 0.0
+        score = self._parse_score_or_default(
+            content,
+            default=0.0,
+            context=f"image_clause_binary:{sanitized_clause}",
+        )
+        return 1.0 if score >= 0.5 else 0.0
