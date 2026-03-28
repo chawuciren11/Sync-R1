@@ -362,7 +362,7 @@ def build_generation_prompt_specs(
                 ),
                 tp_prefix_text=tp_prefix_text,
                 conditioning_text=conditioning_text,
-                reference_image_paths=[],
+                reference_image_paths=reference_image_paths,
                 metadata={
                     "source": "rea_prediction",
                     "generation_input_mode": "text_only",
@@ -402,7 +402,7 @@ def build_generation_prompt_specs(
                 ),
                 tp_prefix_text=tp_prefix_text,
                 conditioning_text=conditioning_text,
-                reference_image_paths=[],
+                reference_image_paths=reference_image_paths,
                 metadata={
                     "source": "dense_rea_prediction",
                     "generation_input_mode": "text_only",
