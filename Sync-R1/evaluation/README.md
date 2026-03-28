@@ -6,7 +6,8 @@
 - `evaluation/user_settings.py`: edit this file directly for default runtime parameters.
 - `evaluation/tasks.py`: task registry and dataset parsing for both generation and understanding.
 - `evaluation/adapters/`: model adapters. The working local implementation is `showo_weighted`.
-- `evaluation/adapters/external_baseline.py`: shared scaffold for future `bagel/janus` TP/IP baselines.
+- `evaluation/adapters/external_baseline.py`: shared scaffold for external TP/IP baselines.
+- `evaluation/adapters/janus_base.py`: Janus-Pro runtime for multimodal understanding and text-to-image generation.
 - `evaluation/scorers/`: CLIP, GPT, and text-based scoring utilities.
 
 ## Recommended workflow
@@ -46,8 +47,8 @@
 - `showo` / `showo_weighted`: current local baseline with token weights and optional RL checkpoint
 - `bagel_tp`: scaffold for Bagel text-prompt baseline
 - `bagel_ip`: scaffold for Bagel image-prompt baseline
-- `janus_tp`: scaffold for Janus text-prompt baseline
-- `janus_ip`: scaffold for Janus image-prompt baseline
+- `janus_tp`: Janus-Pro text-prompt baseline for both understanding and generation
+- `janus_ip`: Janus-Pro image-prompt baseline; understanding uses reference images directly, and generation first turns the reference image(s) into a short text description because Janus generation itself is text-only
 
 ## Common commands
 
@@ -110,15 +111,47 @@ python D:\unicr1\Sync-R1\scripts\run_parallel_eval.py ^
   --adapter-max-memory-per-gpu 20GiB
 ```
 
+Janus-Pro-1B TP baseline:
+
+```bash
+python D:\unicr1\Sync-R1\eval_pipeline.py ^
+  --mode run ^
+  --adapter janus_tp ^
+  --tasks all ^
+  --concepts all ^
+  --epoch-to-load 0 ^
+  --model-epochs 0 ^
+  --adapter-model-id deepseek-ai/Janus-Pro-1B ^
+  --adapter-image-height 384 ^
+  --adapter-image-width 384
+```
+
+Janus-Pro-7B IP baseline:
+
+```bash
+python D:\unicr1\Sync-R1\eval_pipeline.py ^
+  --mode run ^
+  --adapter janus_ip ^
+  --tasks all ^
+  --concepts all ^
+  --epoch-to-load 0 ^
+  --model-epochs 0 ^
+  --reference-image-count 1 ^
+  --adapter-model-id deepseek-ai/Janus-Pro-7B ^
+  --adapter-code-root D:\path\to\Janus ^
+  --adapter-image-height 384 ^
+  --adapter-image-width 384
+```
+
 ## Important parameters
 
 - `--seed`: one global seed for generation and understanding
 - `--reference-image-count`: how many train reference images to pass to IP baselines
 - `--adapter-code-root`: local BAGEL source repo root, containing `inferencer.py`, `data/`, and `modeling/`
-- `--adapter-model-id`: local BAGEL checkpoint directory, typically `BAGEL-7B-MoT`
+- `--adapter-model-id`: local checkpoint directory or repo id for external baselines; for Janus use either `deepseek-ai/Janus-Pro-1B`, `deepseek-ai/Janus-Pro-7B`, or a local checkpoint path
 - `--adapter-max-memory-per-gpu`: max memory string passed to `infer_auto_device_map`, such as `20GiB`
 - `--adapter-offload-dir`: offload folder for multi-GPU / disk offload
-- `--adapter-image-height`, `--adapter-image-width`: requested output image size for generation
+- `--adapter-image-height`, `--adapter-image-width`: requested output image size for generation; Janus-Pro generation expects dimensions divisible by `16` and typically uses `384x384`
 - `--adapter-cfg-text-scale`, `--adapter-cfg-img-scale`, `--adapter-cfg-interval-start`
 - `--adapter-timestep-shift`, `--adapter-num-timesteps`, `--adapter-cfg-renorm-min`, `--adapter-cfg-renorm-type`
 - `--adapter-use-thinking`: optional, off by default for simple baseline prompts
@@ -128,7 +161,7 @@ python D:\unicr1\Sync-R1\scripts\run_parallel_eval.py ^
 
 ## Add a new model later
 
-To finish a new external adapter such as Bagel or Janus:
+To finish a new external adapter later:
 
 1. Reuse one of `bagel_tp.py`, `bagel_ip.py`, `janus_tp.py`, `janus_ip.py`
 2. Implement model calls in `ExternalBaselineAdapter._generate_images_for_prompt`

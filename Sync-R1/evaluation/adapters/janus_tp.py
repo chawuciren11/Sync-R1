@@ -1,6 +1,6 @@
-from .external_baseline import ExternalBaselineAdapter
+from .janus_base import JanusAdapterBase
 
 
-class JanusTPAdapter(ExternalBaselineAdapter):
+class JanusTPAdapter(JanusAdapterBase):
     model_family = "janus"
     prompt_mode = "tp"

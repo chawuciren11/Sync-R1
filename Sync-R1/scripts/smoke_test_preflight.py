@@ -86,6 +86,17 @@ def main() -> None:
         model_ok = model_root is not None and Path(str(model_root)).exists()
         _print_check("bagel_code_root", code_ok, str(code_root))
         _print_check("bagel_model_root", model_ok, str(model_root))
+    elif adapter_name.startswith("janus"):
+        code_root = PIPELINE_DEFAULTS["adapter_code_root"]
+        model_root = PIPELINE_DEFAULTS["adapter_model_id"]
+        code_ok = code_root is None or Path(str(code_root)).exists()
+        if model_root is None:
+            model_ok = False
+        else:
+            model_text = str(model_root)
+            model_ok = Path(model_text).exists() or "/" in model_text
+        _print_check("janus_code_root", code_ok, str(code_root))
+        _print_check("janus_model_id", model_ok, str(model_root))
 
     print("Preflight finished.")
 
