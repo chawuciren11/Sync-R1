@@ -210,7 +210,9 @@ class JanusAdapterBase(ExternalBaselineAdapter):
 
     def _select_understanding_prompt(self, example: UnderstandingExampleSpec) -> str:
         prompt_text = super()._select_understanding_prompt(example)
-        return self._join_text_segments(example.conditioning_text, prompt_text)
+        if self.prompt_mode == "ip":
+            return self._join_text_segments(example.conditioning_text, prompt_text)
+        return prompt_text
 
     def _generate_images_for_prompt(
         self,
@@ -293,8 +295,9 @@ class JanusAdapterBase(ExternalBaselineAdapter):
         prompt_spec: PromptSpec,
         reference_image_paths: Sequence[str],
     ) -> tuple[str, str | None]:
-        prompt_text = super()._select_generation_prompt(prompt_spec)
-        prompt_text = self._join_text_segments(prompt_spec.conditioning_text, prompt_text)
+        prompt_text = self._select_janus_generation_prompt(prompt_spec)
+        if self.prompt_mode == "ip":
+            prompt_text = self._join_text_segments(prompt_spec.conditioning_text, prompt_text)
         reference_caption = None
         if self.prompt_mode == "ip" and reference_image_paths:
             reference_caption = self._describe_reference_images(reference_image_paths)
@@ -303,6 +306,20 @@ class JanusAdapterBase(ExternalBaselineAdapter):
                 f"Reference appearance details: {reference_caption}",
             )
         return prompt_text, reference_caption
+
+    def _select_janus_generation_prompt(self, prompt_spec: PromptSpec) -> str:
+        prompt_text = self._select_janus_generation_source_text(prompt_spec)
+        if self.prompt_mode == "tp":
+            return self._apply_tp_prefix(prompt_spec.tp_prefix_text, prompt_text)
+        return prompt_text
+
+    def _select_janus_generation_source_text(self, prompt_spec: PromptSpec) -> str:
+        metadata = prompt_spec.metadata or {}
+        for key in ("dense_rea_prediction", "rea_prediction"):
+            candidate = str(metadata.get(key, "")).strip()
+            if candidate:
+                return candidate
+        return prompt_spec.source_prompt
 
     def _describe_reference_images(self, reference_image_paths: Sequence[str]) -> str:
         key = tuple(str(Path(path)) for path in reference_image_paths)
